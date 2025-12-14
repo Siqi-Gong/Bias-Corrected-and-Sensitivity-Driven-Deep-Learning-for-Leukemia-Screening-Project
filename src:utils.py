@@ -14,7 +14,6 @@ from tensorflow.keras.models import load_model
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, classification_report
 
-# 设置绘图风格
 sns.set_style('darkgrid')
 
 def print_in_color(txt_msg, fore_tupple, back_tupple):
