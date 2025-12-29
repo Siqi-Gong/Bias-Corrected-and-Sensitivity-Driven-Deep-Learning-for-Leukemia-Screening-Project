@@ -13,13 +13,12 @@ from tensorflow.keras import regularizers
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.metrics import Recall, Precision
 from sklearn.utils import class_weight
-
 from utils import preprocess, trim, LRA, tr_plot, print_info, saver, print_in_color
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Leukemia Diagnosis Pipeline")
-    parser.add_argument("--data_dir", type=str, default="../input/leukemia-classification/C-NMC_Leukemia/training_data", 
-                        help="Path to dataset directory")
+    parser.add_argument("--data_dir", type=str, default="./data", 
+                        help="Path to dataset directory (default: ./data)")
     parser.add_argument("--working_dir", type=str, default="./results", help="Directory to save results")
     parser.add_argument("--epochs", type=int, default=40, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=40, help="Batch size")
@@ -27,8 +26,20 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if not os.path.exists(args.working_dir):
-        os.makedirs(args.working_dir)
+    data_dir = os.path.abspath(args.data_dir)
+    working_dir = os.path.abspath(args.working_dir)
+    if not os.path.exists(data_dir):
+        print_in_color(f"Error: Data directory not found at: {data_dir}", (255, 0, 0), (55, 65, 80))
+        print("----------------------------------------------------")
+        print("How to fix:")
+        print("1. Create a folder named 'data' inside this project.")
+        print("2. Download the C-NMC_Leukemia dataset and unzip it there.")
+        print(f"3. OR specify your custom path: python src/main.py --data_dir /path/to/your/data")
+        print("----------------------------------------------------")
+        return
+    if not os.path.exists(working_dir):
+        os.makedirs(working_dir)
+        print(f"Created results directory at: {working_dir}")
 
     img_size = (300, 300)
     channels = 3
@@ -36,49 +47,44 @@ def main():
     class_count = 2 # Normal vs Leukemia
 
     # 1. Cohort Construction (Stratified Sampling)
-    # Biostats: Ensures consistent disease prevalence across splits to prevent distribution shift.
+    # Ensures consistent disease prevalence across splits to prevent distribution shift.
     try:
-        train_df, test_df, valid_df = preprocess(args.data_dir, trsplit=0.9, vsplit=0.05)
+        train_df, test_df, valid_df = preprocess(data_dir, trsplit=0.9, vsplit=0.05)
     except Exception as e:
-        print(f"Error loading data from {args.data_dir}: {e}")
+        print(f"Error loading data from {data_dir}: {e}")
         return
 
     # 2. Bias Mitigation (Under-sampling)
-    # Biostats: Corrects Selection Bias by balancing majority class (HEM) to match minority (ALL).
+    # Corrects Selection Bias by balancing majority class (HEM) to match minority (ALL).
     max_samples = 3000 # Limit majority class size
     min_samples = 0
     train_df = trim(train_df, max_samples, min_samples, 'labels')
 
     # 3. Data Augmentation
-    # Biostats: Simulates biological variability (rotation, flip) to improve robustness.
+    # Simulates biological variability (rotation, flip) to improve robustness.
     # Note: EfficientNet expects pixels in range 0-255, so no rescaling (1./255) is needed here if using 'imagenet' weights properly via internal preprocessing,
     # but the notebook used a scalar identity function. We keep it consistent.
     def scalar(img):
         return img 
-
     trgen = ImageDataGenerator(preprocessing_function=scalar, horizontal_flip=True, rotation_range=20)
     tvgen = ImageDataGenerator(preprocessing_function=scalar)
 
     train_gen = trgen.flow_from_dataframe(train_df, x_col='filepaths', y_col='labels', target_size=img_size, 
                                           class_mode='categorical', color_mode='rgb', shuffle=True, batch_size=args.batch_size)
-    
     valid_gen = tvgen.flow_from_dataframe(valid_df, x_col='filepaths', y_col='labels', target_size=img_size, 
                                           class_mode='categorical', color_mode='rgb', shuffle=True, batch_size=args.batch_size)
-    
     # Calculate optimal batch size for testing based on dataset length
     length = len(test_df)
     test_batch_size = sorted([int(length/n) for n in range(1, length+1) if length % n == 0 and length/n <= 80], reverse=True)[0]
     test_steps = int(length / test_batch_size)
-    
     test_gen = tvgen.flow_from_dataframe(test_df, x_col='filepaths', y_col='labels', target_size=img_size, 
                                          class_mode='categorical', color_mode='rgb', shuffle=False, batch_size=test_batch_size)
 
     # 4. Model Definition (EfficientNetB3)
-    # Biostats: High-dimensional feature extraction for unstructured image data.
+    # High-dimensional feature extraction for unstructured image data.
     model_name = 'EfficientNetB3'
     base_model = tf.keras.applications.efficientnet.EfficientNetB3(
         include_top=False, weights="imagenet", input_shape=img_shape, pooling='max')
-    
     x = base_model.output
     x = BatchNormalization(axis=-1, momentum=0.99, epsilon=0.001)(x)
     x = Dense(256, kernel_regularizer=regularizers.l2(0.016),
@@ -88,7 +94,6 @@ def main():
     output = Dense(class_count, activation='softmax')(x)
     
     model = Model(inputs=base_model.input, outputs=output)
-
     model.compile(Adamax(learning_rate=0.001), 
                   loss='categorical_crossentropy', 
                   metrics=['accuracy', Recall(name='recall'), Precision(name='precision')])
@@ -97,14 +102,12 @@ def main():
     train_labels = train_gen.classes 
     class_indices = train_gen.class_indices 
     print(f"Class Mapping: {class_indices}") 
-
     class_weights_vals = class_weight.compute_class_weight(
         class_weight='balanced',
         classes=np.unique(train_labels),
         y=train_labels
     )
     class_weights = dict(enumerate(class_weights_vals))
-
     target_class_name = 'ALL' 
     if target_class_name in class_indices:
         target_idx = class_indices[target_class_name]
@@ -117,9 +120,7 @@ def main():
     # 5. Training with LRA
     callbacks = [LRA(model=model, base_model=base_model, patience=1, stop_patience=3, threshold=0.9,
                      factor=0.5, dwell=True, batches=len(train_gen), initial_epoch=0, epochs=args.epochs, ask_epoch=5)]
-
     print("Starting training...")
-
     history = model.fit(x=train_gen, 
                         epochs=args.epochs, 
                         verbose=1, 
@@ -133,7 +134,6 @@ def main():
     # 6. Evaluation & Visualization
     print("\nTraining complete. Plotting history...")
     tr_plot(history, 0)
-
     print("\nEvaluating on Test Set...")
     # Focus on Sensitivity (Recall) to minimize Type II errors (False Negatives).
     preds = model.predict(test_gen, verbose=1, steps=test_steps)
