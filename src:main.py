@@ -1,4 +1,5 @@
 # Microscopic Diagnosis of Leukemia using Deep Learning & Statistical Optimization
+# author: Siqi Gong
 
 import os
 import argparse
@@ -10,13 +11,13 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adamax
 from tensorflow.keras import regularizers
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.metrics import Recall, Precision
+from sklearn.utils import class_weight
 
-# 引入自定义工具库
 from utils import preprocess, trim, LRA, tr_plot, print_info, saver, print_in_color
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Leukemia Diagnosis Pipeline")
-    # 默认路径假设你在 notebooks/ 目录下运行，或者根据需要修改
     parser.add_argument("--data_dir", type=str, default="../input/leukemia-classification/C-NMC_Leukemia/training_data", 
                         help="Path to dataset directory")
     parser.add_argument("--working_dir", type=str, default="./results", help="Directory to save results")
@@ -87,23 +88,54 @@ def main():
     output = Dense(class_count, activation='softmax')(x)
     
     model = Model(inputs=base_model.input, outputs=output)
-    model.compile(Adamax(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy'])
+
+    model.compile(Adamax(learning_rate=0.001), 
+                  loss='categorical_crossentropy', 
+                  metrics=['accuracy', Recall(name='recall'), Precision(name='precision')])
+    
+    # calculate Class Weights (cost0sensitive learning)
+    train_labels = train_gen.classes 
+    class_indices = train_gen.class_indices 
+    print(f"Class Mapping: {class_indices}") 
+
+    class_weights_vals = class_weight.compute_class_weight(
+        class_weight='balanced',
+        classes=np.unique(train_labels),
+        y=train_labels
+    )
+    class_weights = dict(enumerate(class_weights_vals))
+
+    target_class_name = 'ALL' 
+    if target_class_name in class_indices:
+        target_idx = class_indices[target_class_name]
+        class_weights[target_idx] *= 2.0  
+        print(f"Adjusted Class Weights (Penalizing Misses): {class_weights}")
+    else:
+        print("Warning: Target class name not found in indices, using balanced weights.")
+        print(f"Balanced Weights: {class_weights}")
 
     # 5. Training with LRA
-    # Biostats: Custom callback to adjust LR based on validation loss stability.
     callbacks = [LRA(model=model, base_model=base_model, patience=1, stop_patience=3, threshold=0.9,
                      factor=0.5, dwell=True, batches=len(train_gen), initial_epoch=0, epochs=args.epochs, ask_epoch=5)]
 
     print("Starting training...")
-    history = model.fit(x=train_gen, epochs=args.epochs, verbose=1, callbacks=callbacks, 
-                        validation_data=valid_gen, validation_steps=None, shuffle=False, initial_epoch=0)
 
+    history = model.fit(x=train_gen, 
+                        epochs=args.epochs, 
+                        verbose=1, 
+                        callbacks=callbacks, 
+                        validation_data=valid_gen, 
+                        validation_steps=None, 
+                        shuffle=False, 
+                        initial_epoch=0,
+                        class_weight=class_weights) 
+    
     # 6. Evaluation & Visualization
     print("\nTraining complete. Plotting history...")
     tr_plot(history, 0)
 
     print("\nEvaluating on Test Set...")
-    # Biostats: Focus on Sensitivity (Recall) to minimize Type II errors (False Negatives).
+    # Focus on Sensitivity (Recall) to minimize Type II errors (False Negatives).
     preds = model.predict(test_gen, verbose=1, steps=test_steps)
     acc = print_info(test_gen, preds, print_code=0, save_dir=args.working_dir, subject='leukemia')
 
